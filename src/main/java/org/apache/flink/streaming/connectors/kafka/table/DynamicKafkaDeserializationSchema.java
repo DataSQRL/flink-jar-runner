@@ -33,6 +33,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 
 import javax.annotation.Nullable;
 
+import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
@@ -56,6 +57,10 @@ class DynamicKafkaDeserializationSchema implements KafkaDeserializationSchema<Ro
 
     private final boolean upsertMode;
 
+    private final DeserFailureHandler deserFailureHandler;
+
+    private final @Nullable Object deserFailureTarget;
+
     DynamicKafkaDeserializationSchema(
             int physicalArity,
             @Nullable DeserializationSchema<RowData> keyDeserialization,
@@ -65,7 +70,9 @@ class DynamicKafkaDeserializationSchema implements KafkaDeserializationSchema<Ro
             boolean hasMetadata,
             MetadataConverter[] metadataConverters,
             TypeInformation<RowData> producedTypeInfo,
-            boolean upsertMode) {
+            boolean upsertMode,
+            DeserFailureHandler deserFailureHandler,
+            @Nullable Object deserFailureTarget) {
         if (upsertMode) {
             Preconditions.checkArgument(
                     keyDeserialization != null && keyProjection.length > 0,
@@ -84,6 +91,8 @@ class DynamicKafkaDeserializationSchema implements KafkaDeserializationSchema<Ro
                         upsertMode);
         this.producedTypeInfo = producedTypeInfo;
         this.upsertMode = upsertMode;
+        this.deserFailureHandler = deserFailureHandler;
+        this.deserFailureTarget = deserFailureTarget;
     }
 
     @Override
@@ -110,13 +119,13 @@ class DynamicKafkaDeserializationSchema implements KafkaDeserializationSchema<Ro
         // shortcut in case no output projection is required,
         // also not for a cartesian product with the keys
         if (keyDeserialization == null && !hasMetadata) {
-            valueDeserialization.deserialize(record.value(), collector);
+            deserWithFailureHandling(record, () -> valueDeserialization.deserialize(record.value(), collector));
             return;
         }
 
         // buffer key(s)
         if (keyDeserialization != null) {
-            keyDeserialization.deserialize(record.key(), keyCollector);
+            deserWithFailureHandling(record, () -> keyDeserialization.deserialize(record.key(), keyCollector));
         }
 
         // project output while emitting values
@@ -127,7 +136,7 @@ class DynamicKafkaDeserializationSchema implements KafkaDeserializationSchema<Ro
             // collect tombstone messages in upsert mode by hand
             outputCollector.collect(null);
         } else {
-            valueDeserialization.deserialize(record.value(), outputCollector);
+            deserWithFailureHandling(record, () -> valueDeserialization.deserialize(record.value(), outputCollector));
         }
         keyCollector.buffer.clear();
     }
@@ -135,6 +144,25 @@ class DynamicKafkaDeserializationSchema implements KafkaDeserializationSchema<Ro
     @Override
     public TypeInformation<RowData> getProducedType() {
         return producedTypeInfo;
+    }
+
+    void deserWithFailureHandling(ConsumerRecord<byte[], byte[]> record, DeserializationCaller deser)
+            throws IOException {
+        try {
+            deser.call();
+        } catch (IOException e) {
+            if (DeserFailureHandler.NONE == deserFailureHandler) {
+                throw e;
+            } else if (DeserFailureHandler.LOG == deserFailureHandler) {
+                // todo log the record
+            } else if (DeserFailureHandler.KAFKA == deserFailureHandler) {
+                // todo send record via Kafka producer
+            }
+        }
+    }
+
+    private interface DeserializationCaller extends Serializable {
+        void call() throws IOException;
     }
 
     // --------------------------------------------------------------------------------------------

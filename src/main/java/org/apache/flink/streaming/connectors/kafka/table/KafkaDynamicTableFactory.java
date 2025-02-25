@@ -114,6 +114,18 @@ public class KafkaDynamicTableFactory
                     .noDefaultValue()
                     .withDescription("Optional semantic when committing.");
 
+    private static final ConfigOption<DeserFailureHandler> SCAN_DESER_FAILURE_HANDLER =
+            ConfigOptions.key("scan.deser.failure-handler")
+                    .enumType(DeserFailureHandler.class)
+                    .defaultValue(DeserFailureHandler.NONE)
+                    .withDescription("asd");
+
+    private static final ConfigOption<String> SCAN_DESER_FAILURE_TOPIC =
+            ConfigOptions.key("scan.deser.failure-topic")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription("asd");
+
     public static final String IDENTIFIER = "kafka";
 
     @Override
@@ -152,6 +164,8 @@ public class KafkaDynamicTableFactory
         options.add(SCAN_BOUNDED_MODE);
         options.add(SCAN_BOUNDED_SPECIFIC_OFFSETS);
         options.add(SCAN_BOUNDED_TIMESTAMP_MILLIS);
+        options.add(SCAN_DESER_FAILURE_HANDLER);
+        options.add(SCAN_DESER_FAILURE_TOPIC);
         return options;
     }
 
@@ -201,8 +215,7 @@ public class KafkaDynamicTableFactory
         final Properties properties = getKafkaProperties(context.getCatalogTable().getOptions());
 
         // add topic-partition discovery
-        final Duration partitionDiscoveryInterval =
-                tableOptions.get(SCAN_TOPIC_PARTITION_DISCOVERY);
+        final Duration partitionDiscoveryInterval = tableOptions.get(SCAN_TOPIC_PARTITION_DISCOVERY);
         properties.setProperty(
                 KafkaSourceOptions.PARTITION_DISCOVERY_INTERVAL_MS.key(),
                 Long.toString(partitionDiscoveryInterval.toMillis()));
@@ -214,6 +227,8 @@ public class KafkaDynamicTableFactory
         final int[] valueProjection = createValueFormatProjection(tableOptions, physicalDataType);
 
         final String keyPrefix = tableOptions.getOptional(KEY_FIELDS_PREFIX).orElse(null);
+
+        final DeserFailureHandler deserFailureHandler = tableOptions.get(SCAN_DESER_FAILURE_HANDLER);
 
         return createKafkaTableSource(
                 physicalDataType,
@@ -231,14 +246,15 @@ public class KafkaDynamicTableFactory
                 boundedOptions.boundedMode,
                 boundedOptions.specificOffsets,
                 boundedOptions.boundedTimestampMillis,
-                context.getObjectIdentifier().asSummaryString());
+                context.getObjectIdentifier().asSummaryString(),
+                deserFailureHandler,
+                null);
     }
 
     @Override
     public DynamicTableSink createDynamicTableSink(Context context) {
         final TableFactoryHelper helper =
-                FactoryUtil.createTableFactoryHelper(
-                        this, autoCompleteSchemaRegistrySubject(context));
+                FactoryUtil.createTableFactoryHelper(this, autoCompleteSchemaRegistrySubject(context));
 
         final Optional<EncodingFormat<SerializationSchema<RowData>>> keyEncodingFormat =
                 getKeyEncodingFormat(helper);
@@ -291,8 +307,7 @@ public class KafkaDynamicTableFactory
     private static Optional<DecodingFormat<DeserializationSchema<RowData>>> getKeyDecodingFormat(
             TableFactoryHelper helper) {
         final Optional<DecodingFormat<DeserializationSchema<RowData>>> keyDecodingFormat =
-                helper.discoverOptionalDecodingFormat(
-                        DeserializationFormatFactory.class, KEY_FORMAT);
+                helper.discoverOptionalDecodingFormat(DeserializationFormatFactory.class, KEY_FORMAT);
         keyDecodingFormat.ifPresent(
                 format -> {
                     if (!format.getChangelogMode().containsOnly(RowKind.INSERT)) {
@@ -300,8 +315,7 @@ public class KafkaDynamicTableFactory
                                 String.format(
                                         "A key format should only deal with INSERT-only records. "
                                                 + "But %s has a changelog mode of %s.",
-                                        helper.getOptions().get(KEY_FORMAT),
-                                        format.getChangelogMode()));
+                                        helper.getOptions().get(KEY_FORMAT), format.getChangelogMode()));
                     }
                 });
         return keyDecodingFormat;
@@ -318,8 +332,7 @@ public class KafkaDynamicTableFactory
                                 String.format(
                                         "A key format should only deal with INSERT-only records. "
                                                 + "But %s has a changelog mode of %s.",
-                                        helper.getOptions().get(KEY_FORMAT),
-                                        format.getChangelogMode()));
+                                        helper.getOptions().get(KEY_FORMAT), format.getChangelogMode()));
                     }
                 });
         return keyEncodingFormat;
@@ -327,22 +340,18 @@ public class KafkaDynamicTableFactory
 
     private static DecodingFormat<DeserializationSchema<RowData>> getValueDecodingFormat(
             TableFactoryHelper helper) {
-        return helper.discoverOptionalDecodingFormat(
-                        DeserializationFormatFactory.class, FactoryUtil.FORMAT)
+        return helper
+                .discoverOptionalDecodingFormat(DeserializationFormatFactory.class, FactoryUtil.FORMAT)
                 .orElseGet(
-                        () ->
-                                helper.discoverDecodingFormat(
-                                        DeserializationFormatFactory.class, VALUE_FORMAT));
+                        () -> helper.discoverDecodingFormat(DeserializationFormatFactory.class, VALUE_FORMAT));
     }
 
     private static EncodingFormat<SerializationSchema<RowData>> getValueEncodingFormat(
             TableFactoryHelper helper) {
-        return helper.discoverOptionalEncodingFormat(
-                        SerializationFormatFactory.class, FactoryUtil.FORMAT)
+        return helper
+                .discoverOptionalEncodingFormat(SerializationFormatFactory.class, FactoryUtil.FORMAT)
                 .orElseGet(
-                        () ->
-                                helper.discoverEncodingFormat(
-                                        SerializationFormatFactory.class, VALUE_FORMAT));
+                        () -> helper.discoverEncodingFormat(SerializationFormatFactory.class, VALUE_FORMAT));
     }
 
     private static void validatePKConstraints(
@@ -350,13 +359,10 @@ public class KafkaDynamicTableFactory
             int[] primaryKeyIndexes,
             Map<String, String> options,
             Format format) {
-        if (primaryKeyIndexes.length > 0
-                && format.getChangelogMode().containsOnly(RowKind.INSERT)) {
+        if (primaryKeyIndexes.length > 0 && format.getChangelogMode().containsOnly(RowKind.INSERT)) {
             Configuration configuration = Configuration.fromMap(options);
             String formatName =
-                    configuration
-                            .getOptional(FactoryUtil.FORMAT)
-                            .orElse(configuration.get(VALUE_FORMAT));
+                    configuration.getOptional(FactoryUtil.FORMAT).orElse(configuration.get(VALUE_FORMAT));
             throw new ValidationException(
                     String.format(
                             "The Kafka table '%s' with '%s' format doesn't support defining PRIMARY KEY constraint"
@@ -395,7 +401,9 @@ public class KafkaDynamicTableFactory
             BoundedMode boundedMode,
             Map<KafkaTopicPartition, Long> specificEndOffsets,
             long endTimestampMillis,
-            String tableIdentifier) {
+            String tableIdentifier,
+            DeserFailureHandler deserFailureHandler,
+            @Nullable Object deserFailureTarget) {
         return new KafkaDynamicSource(
                 physicalDataType,
                 keyDecodingFormat,
@@ -413,7 +421,9 @@ public class KafkaDynamicTableFactory
                 specificEndOffsets,
                 endTimestampMillis,
                 false,
-                tableIdentifier);
+                tableIdentifier,
+                deserFailureHandler,
+                deserFailureTarget);
     }
 
     protected KafkaDynamicSink createKafkaTableSink(
