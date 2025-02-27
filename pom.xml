@@ -71,6 +71,12 @@
     </dependency>
     <dependency>
       <groupId>org.apache.flink</groupId>
+      <artifactId>flink-connector-base</artifactId>
+      <version>${flink.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.flink</groupId>
       <artifactId>flink-runtime-web</artifactId>
       <version>${flink.version}</version>
       <scope>test</scope>
@@ -270,6 +276,14 @@
               </artifactSet>
               <filters>
                 <filter>
+                  <artifact>org.apache.flink:flink-connector-kafka</artifact>
+                  <excludes>
+                    <exclude>org/apache/flink/streaming/connectors/kafka/table/DynamicKafkaDeserializationSchema**</exclude>
+                    <exclude>org/apache/flink/streaming/connectors/kafka/table/KafkaDynamicSource**</exclude>
+                    <exclude>org/apache/flink/streaming/connectors/kafka/table/KafkaDynamicTableFactory**</exclude>
+                  </excludes>
+                </filter>
+                <filter>
                   <!-- Do not copy the signatures in the META-INF folder.
                   Otherwise, this might cause SecurityExceptions when using the JAR. -->
                   <artifact>*:*</artifact>
@@ -352,6 +366,7 @@
               <header>com/mycila/maven/plugin/license/templates/APACHE-2.txt</header>
 
               <excludes>
+                <exclude>src/main/java/org/apache/flink/**</exclude>
                 <exclude>src/test/resources/**</exclude>
                 <exclude>m2e-target/**</exclude>
               </excludes>
